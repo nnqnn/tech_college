@@ -1,34 +1,24 @@
 # Online Store Transactions
 
-Решение практического задания с тремя транзакционными сценариями для схемы:
+Минимальная реализация SQL-транзакций для интернет-магазина на `Python + sqlite3`.
 
-- `Customers (CustomerID, FirstName, LastName, Email)`
-- `Products (ProductID, ProductName, Price)`
-- `Orders (OrderID, CustomerID, OrderDate, TotalAmount)`
-- `OrderItems (OrderItemID, OrderID, ProductID, Quantity, Subtotal)`
+## Что есть
 
-## Что реализовано
+- `app.py` - инициализация БД и 3 транзакции:
+  - размещение заказа
+  - обновление email клиента
+  - добавление товара
+- `init.sql` - схема БД
+- `Dockerfile`, `docker-compose.yml` - запуск в контейнере
 
-- **Сценарий 1:** транзакция размещения заказа:
-  - создается запись в `Orders`;
-  - добавляются позиции в `OrderItems`;
-  - пересчитывается и обновляется `Orders.TotalAmount` как сумма `Subtotal`.
-- **Сценарий 2:** атомарное обновление email клиента в `Customers`.
-- **Сценарий 3:** атомарное добавление нового продукта в `Products`.
+## Запуск локально
 
-Реализация выполнена на Python с ORM SQLAlchemy и PostgreSQL.
+```bash
+python3 app.py
+```
 
-## Запуск
-
-Из директории `online-store-transactions`:
+## Запуск в Docker
 
 ```bash
 docker compose up --build
 ```
-
-После запуска контейнер `app`:
-
-1. создаст таблицы;
-2. добавит начальные данные (если таблицы пустые);
-3. выполнит 3 сценария транзакций;
-4. выведет итоговое состояние таблиц в лог.

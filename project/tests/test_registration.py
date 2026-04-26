@@ -1,15 +1,7 @@
 from fastapi.testclient import TestClient
 
-from backend.main import app, repository
 
-client = TestClient(app)
-
-
-def setup_function() -> None:
-    repository.clear()
-
-
-def test_register_new_user() -> None:
+def test_register_new_user(client: TestClient) -> None:
     response = client.post(
         "/api/v1/users/register",
         json={
@@ -27,7 +19,7 @@ def test_register_new_user() -> None:
     assert data["user"]["username"] == "test_user"
 
 
-def test_register_existing_user() -> None:
+def test_register_existing_user(client: TestClient) -> None:
     first = client.post("/api/v1/users/register", json={"telegram_id": 777})
     second = client.post(
         "/api/v1/users/register",

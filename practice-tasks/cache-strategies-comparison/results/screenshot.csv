@@ -1,0 +1,10 @@
+strategy,workload,read_percent,write_percent,requests,elapsed_sec,throughput_rps,avg_ms,p95_ms,db_reads,db_writes,db_calls,cache_hits,cache_misses,hit_rate,pending_writes,max_pending_writes,errors
+cache-aside,read-heavy,80,20,12000,15.0,800.04,0.74,1.71,2588,2428,5016,6984,2588,0.7296,0,0,0
+cache-aside,balanced,50,50,12000,15.0,800.04,1.16,1.83,3255,6036,9291,2709,3255,0.4542,0,0,0
+cache-aside,write-heavy,20,80,12000,18.47,649.57,1.52,2.24,1976,9536,11512,488,1976,0.1981,0,0,0
+write-through,read-heavy,80,20,12000,15.0,800.05,0.68,1.83,783,2428,3211,8789,783,0.9182,0,0,0
+write-through,balanced,50,50,12000,15.0,800.02,1.02,1.91,479,6036,6515,5485,479,0.9197,0,0,0
+write-through,write-heavy,20,80,12000,16.25,738.35,1.34,1.94,216,9536,9752,2248,216,0.9123,0,0,0
+write-back,read-heavy,80,20,12000,15.0,800.03,0.4,0.98,783,100,883,8789,783,0.9182,881,881,0
+write-back,balanced,50,50,12000,15.0,800.03,0.46,0.82,479,100,579,5485,479,0.9197,993,993,0
+write-back,write-heavy,20,80,12000,15.0,800.02,0.52,0.69,216,100,316,2248,216,0.9123,999,999,0

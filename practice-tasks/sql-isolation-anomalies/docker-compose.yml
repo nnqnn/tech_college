@@ -1,0 +1,15 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: sql-isolation-anomalies
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: isolation_lab
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./sql/setup.sql:/docker-entrypoint-initdb.d/setup.sql:ro
+
+volumes:
+  mysql_data:

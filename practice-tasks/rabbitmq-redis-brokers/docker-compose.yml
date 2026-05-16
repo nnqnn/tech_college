@@ -1,0 +1,31 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: broker-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    cpus: "1.0"
+    mem_limit: 512m
+
+  redis:
+    image: redis:7-alpine
+    container_name: broker-redis
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    cpus: "1.0"
+    mem_limit: 512m
+
+  runner:
+    build: .
+    working_dir: /app
+    environment:
+      RABBIT_HOST: rabbitmq
+      REDIS_HOST: redis
+    volumes:
+      - .:/app
+    depends_on:
+      - rabbitmq
+      - redis
+    command: ["sleep", "infinity"]

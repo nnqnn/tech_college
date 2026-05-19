@@ -67,6 +67,17 @@ class InteractionRecord:
     created_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class PhotoRecord:
+    id: str
+    telegram_id: int
+    s3_key: str
+    content_type: str
+    file_size: int
+    sort_order: int
+    created_at: datetime
+
+
 PROFILE_COLUMNS = (
     "age",
     "gender",
@@ -200,6 +211,7 @@ def _build_rating(user: UserRecord, stats: InteractionStats) -> RatingRecord:
 class InMemoryDatingRepository:
     def __init__(self) -> None:
         self._users: dict[int, UserRecord] = {}
+        self._photos: dict[str, PhotoRecord] = {}
         self._interactions: dict[tuple[int, int], InteractionRecord] = {}
         self._ratings: dict[int, RatingRecord] = {}
         self._lock = Lock()
@@ -278,6 +290,9 @@ class InMemoryDatingRepository:
                 )
 
             data = _profile_dict(user, updates)
+            actual_photos_count = len(self._photos_for_user_unlocked(telegram_id))
+            if actual_photos_count:
+                data["photos_count"] = actual_photos_count
             data["profile_completion_pct"] = calculate_profile_completion(data)
             for key, value in data.items():
                 if hasattr(user, key):
@@ -337,6 +352,8 @@ class InMemoryDatingRepository:
             user.city = None
             user.profile_completion_pct = 0
             user.photos_count = 0
+            for photo in self._photos_for_user_unlocked(telegram_id):
+                self._photos.pop(photo.id, None)
             user.age_pref_min = None
             user.age_pref_max = None
             user.gender_pref = None
@@ -356,6 +373,56 @@ class InMemoryDatingRepository:
                 [user for user in self._users.values() if _profile_is_visible(user)],
                 key=lambda user: user.telegram_id,
             )
+
+    def add_photo(
+        self,
+        *,
+        photo_id: str,
+        telegram_id: int,
+        s3_key: str,
+        content_type: str,
+        file_size: int,
+    ) -> PhotoRecord:
+        with self._lock:
+            if telegram_id not in self._users:
+                raise NotFoundError(f"User with telegram_id={telegram_id} not found")
+
+            sort_order = len(self._photos_for_user_unlocked(telegram_id))
+            photo = PhotoRecord(
+                id=photo_id,
+                telegram_id=telegram_id,
+                s3_key=s3_key,
+                content_type=content_type,
+                file_size=file_size,
+                sort_order=sort_order,
+                created_at=_utc_now(),
+            )
+            self._photos[photo.id] = photo
+            self._sync_photo_count_unlocked(telegram_id)
+            self._refresh_rating_unlocked(telegram_id)
+            return photo
+
+    def list_photos(self, telegram_id: int) -> list[PhotoRecord]:
+        with self._lock:
+            if telegram_id not in self._users:
+                raise NotFoundError(f"User with telegram_id={telegram_id} not found")
+            return list(self._photos_for_user_unlocked(telegram_id))
+
+    def get_photo(self, photo_id: str) -> PhotoRecord | None:
+        with self._lock:
+            return self._photos.get(photo_id)
+
+    def delete_photo(self, telegram_id: int, photo_id: str) -> PhotoRecord:
+        with self._lock:
+            photo = self._photos.get(photo_id)
+            if photo is None or photo.telegram_id != telegram_id:
+                raise NotFoundError(f"Photo with id={photo_id} not found")
+
+            self._photos.pop(photo_id, None)
+            self._renumber_photos_unlocked(telegram_id)
+            self._sync_photo_count_unlocked(telegram_id)
+            self._refresh_rating_unlocked(telegram_id)
+            return photo
 
     def create_interaction(
         self,
@@ -405,6 +472,14 @@ class InMemoryDatingRepository:
         with self._lock:
             return self._refresh_rating_unlocked(telegram_id)
 
+    def refresh_all_ratings(self) -> int:
+        with self._lock:
+            refreshed = 0
+            for telegram_id in list(self._users):
+                if self._refresh_rating_unlocked(telegram_id) is not None:
+                    refreshed += 1
+            return refreshed
+
     def list_feed_candidates(self, telegram_id: int, limit: int) -> list[UserRecord]:
         with self._lock:
             requester = self._users.get(telegram_id)
@@ -435,6 +510,7 @@ class InMemoryDatingRepository:
     def clear(self) -> None:
         with self._lock:
             self._users.clear()
+            self._photos.clear()
             self._interactions.clear()
             self._ratings.clear()
 
@@ -471,6 +547,32 @@ class InMemoryDatingRepository:
             mutual_likes=mutual_likes,
             referrals_count=referrals_count,
         )
+
+    def _photos_for_user_unlocked(self, telegram_id: int) -> list[PhotoRecord]:
+        return sorted(
+            [photo for photo in self._photos.values() if photo.telegram_id == telegram_id],
+            key=lambda photo: (photo.sort_order, photo.created_at),
+        )
+
+    def _renumber_photos_unlocked(self, telegram_id: int) -> None:
+        for sort_order, photo in enumerate(self._photos_for_user_unlocked(telegram_id)):
+            self._photos[photo.id] = PhotoRecord(
+                id=photo.id,
+                telegram_id=photo.telegram_id,
+                s3_key=photo.s3_key,
+                content_type=photo.content_type,
+                file_size=photo.file_size,
+                sort_order=sort_order,
+                created_at=photo.created_at,
+            )
+
+    def _sync_photo_count_unlocked(self, telegram_id: int) -> None:
+        user = self._users.get(telegram_id)
+        if user is None:
+            return
+        user.photos_count = len(self._photos_for_user_unlocked(telegram_id))
+        user.profile_completion_pct = calculate_profile_completion(_profile_dict(user))
+        user.updated_at = _utc_now()
 
     def _refresh_rating_unlocked(self, telegram_id: int) -> RatingRecord | None:
         user = self._users.get(telegram_id)
@@ -525,6 +627,18 @@ class PostgresDatingRepository:
             )
             conn.execute(
                 """
+                ALTER TABLE user_photos
+                ADD COLUMN IF NOT EXISTS content_type VARCHAR(128) NOT NULL DEFAULT 'image/jpeg'
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE user_photos
+                ADD COLUMN IF NOT EXISTS file_size BIGINT NOT NULL DEFAULT 0
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS user_interactions (
                     id UUID PRIMARY KEY,
                     requester_telegram_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
@@ -565,6 +679,9 @@ class PostgresDatingRepository:
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_user_ratings_total_score ON user_ratings (total_score)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_user_photos_telegram_order ON user_photos (telegram_id, sort_order)"
             )
 
     def upsert_user(
@@ -639,6 +756,9 @@ class PostgresDatingRepository:
             raise NotFoundError(f"User with telegram_id={telegram_id} not found")
 
         data = _profile_dict(current, updates)
+        actual_photos_count = self._count_photos(telegram_id)
+        if actual_photos_count:
+            data["photos_count"] = actual_photos_count
         completion_pct = calculate_profile_completion(data)
         data["profile_completion_pct"] = completion_pct
         data["telegram_id"] = telegram_id
@@ -702,6 +822,10 @@ class PostgresDatingRepository:
                 """,
                 {"telegram_id": telegram_id, "now": _utc_now()},
             ).fetchone()
+            conn.execute(
+                "DELETE FROM user_photos WHERE telegram_id = %(telegram_id)s",
+                {"telegram_id": telegram_id},
+            )
 
         user = self._row_to_user(row)
         self.refresh_rating(telegram_id)
@@ -720,6 +844,112 @@ class PostgresDatingRepository:
                 """
             ).fetchall()
         return [self._row_to_user(row) for row in rows]
+
+    def add_photo(
+        self,
+        *,
+        photo_id: str,
+        telegram_id: int,
+        s3_key: str,
+        content_type: str,
+        file_size: int,
+    ) -> PhotoRecord:
+        if self.get_user(telegram_id) is None:
+            raise NotFoundError(f"User with telegram_id={telegram_id} not found")
+
+        with self._connect() as conn:
+            next_order = conn.execute(
+                """
+                SELECT COALESCE(MAX(sort_order) + 1, 0) AS next_order
+                FROM user_photos
+                WHERE telegram_id = %(telegram_id)s
+                """,
+                {"telegram_id": telegram_id},
+            ).fetchone()["next_order"]
+            row = conn.execute(
+                """
+                INSERT INTO user_photos (
+                    id, telegram_id, s3_key, content_type, file_size, sort_order, created_at
+                )
+                VALUES (
+                    %(id)s, %(telegram_id)s, %(s3_key)s, %(content_type)s,
+                    %(file_size)s, %(sort_order)s, %(now)s
+                )
+                RETURNING *
+                """,
+                {
+                    "id": photo_id,
+                    "telegram_id": telegram_id,
+                    "s3_key": s3_key,
+                    "content_type": content_type,
+                    "file_size": file_size,
+                    "sort_order": next_order,
+                    "now": _utc_now(),
+                },
+            ).fetchone()
+            self._sync_photo_count(conn, telegram_id)
+
+        self.refresh_rating(telegram_id)
+        return self._row_to_photo(row)
+
+    def list_photos(self, telegram_id: int) -> list[PhotoRecord]:
+        if self.get_user(telegram_id) is None:
+            raise NotFoundError(f"User with telegram_id={telegram_id} not found")
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM user_photos
+                WHERE telegram_id = %(telegram_id)s
+                ORDER BY sort_order, created_at
+                """,
+                {"telegram_id": telegram_id},
+            ).fetchall()
+        return [self._row_to_photo(row) for row in rows]
+
+    def get_photo(self, photo_id: str) -> PhotoRecord | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM user_photos WHERE id = %(photo_id)s",
+                {"photo_id": photo_id},
+            ).fetchone()
+        return self._row_to_photo(row) if row else None
+
+    def delete_photo(self, telegram_id: int, photo_id: str) -> PhotoRecord:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                DELETE FROM user_photos
+                WHERE id = %(photo_id)s AND telegram_id = %(telegram_id)s
+                RETURNING *
+                """,
+                {"photo_id": photo_id, "telegram_id": telegram_id},
+            ).fetchone()
+            if row is None:
+                raise NotFoundError(f"Photo with id={photo_id} not found")
+
+            rows = conn.execute(
+                """
+                SELECT id
+                FROM user_photos
+                WHERE telegram_id = %(telegram_id)s
+                ORDER BY sort_order, created_at
+                """,
+                {"telegram_id": telegram_id},
+            ).fetchall()
+            for sort_order, photo_row in enumerate(rows):
+                conn.execute(
+                    """
+                    UPDATE user_photos SET sort_order = %(sort_order)s
+                    WHERE id = %(photo_id)s
+                    """,
+                    {"sort_order": sort_order, "photo_id": photo_row["id"]},
+                )
+            self._sync_photo_count(conn, telegram_id)
+
+        self.refresh_rating(telegram_id)
+        return self._row_to_photo(row)
 
     def create_interaction(
         self,
@@ -819,6 +1049,16 @@ class PostgresDatingRepository:
                 },
             )
         return rating
+
+    def refresh_all_ratings(self) -> int:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT telegram_id FROM users ORDER BY telegram_id").fetchall()
+
+        refreshed = 0
+        for row in rows:
+            if self.refresh_rating(int(row["telegram_id"])) is not None:
+                refreshed += 1
+        return refreshed
 
     def list_feed_candidates(self, telegram_id: int, limit: int) -> list[UserRecord]:
         requester = self.get_user(telegram_id)
@@ -949,6 +1189,52 @@ class PostgresDatingRepository:
             ).fetchone()
         return row is not None
 
+    def _sync_photo_count(self, conn, telegram_id: int) -> None:
+        photos_count = conn.execute(
+            """
+            SELECT COUNT(*) AS photos_count
+            FROM user_photos
+            WHERE telegram_id = %(telegram_id)s
+            """,
+            {"telegram_id": telegram_id},
+        ).fetchone()["photos_count"]
+        current = conn.execute(
+            "SELECT * FROM users WHERE telegram_id = %(telegram_id)s",
+            {"telegram_id": telegram_id},
+        ).fetchone()
+        if current is None:
+            return
+
+        profile = _profile_dict(self._row_to_user(current), {"photos_count": int(photos_count)})
+        completion_pct = calculate_profile_completion(profile)
+        conn.execute(
+            """
+            UPDATE users SET
+                photos_count = %(photos_count)s,
+                profile_completion_pct = %(profile_completion_pct)s,
+                updated_at = %(now)s
+            WHERE telegram_id = %(telegram_id)s
+            """,
+            {
+                "telegram_id": telegram_id,
+                "photos_count": int(photos_count),
+                "profile_completion_pct": completion_pct,
+                "now": _utc_now(),
+            },
+        )
+
+    def _count_photos(self, telegram_id: int) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS photos_count
+                FROM user_photos
+                WHERE telegram_id = %(telegram_id)s
+                """,
+                {"telegram_id": telegram_id},
+            ).fetchone()
+        return int(row["photos_count"] or 0)
+
     @staticmethod
     def _row_to_user(row: dict[str, Any]) -> UserRecord:
         return UserRecord(
@@ -991,6 +1277,18 @@ class PostgresDatingRepository:
             requester_telegram_id=int(row["requester_telegram_id"]),
             responder_telegram_id=int(row["responder_telegram_id"]),
             is_like=bool(row["is_like"]),
+            created_at=row["created_at"],
+        )
+
+    @staticmethod
+    def _row_to_photo(row: dict[str, Any]) -> PhotoRecord:
+        return PhotoRecord(
+            id=str(row["id"]),
+            telegram_id=int(row["telegram_id"]),
+            s3_key=row["s3_key"],
+            content_type=row.get("content_type") or "image/jpeg",
+            file_size=int(row.get("file_size") or 0),
+            sort_order=int(row.get("sort_order") or 0),
             created_at=row["created_at"],
         )
 

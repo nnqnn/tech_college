@@ -186,3 +186,83 @@ def test_feed_uses_cached_batch_between_requests(
         event for event in event_publisher.snapshot() if event["type"] == "FeedRequested"
     ]
     assert feed_events
+
+
+def test_profile_photo_upload_download_and_delete_updates_profile(client: TestClient) -> None:
+    _create_profile(client, 1, photos_count=0)
+
+    uploaded = client.post(
+        "/api/v1/profiles/1/photos",
+        files={"file": ("avatar.jpg", b"fake-image-bytes", "image/jpeg")},
+    )
+
+    assert uploaded.status_code == 201
+    photo = uploaded.json()
+    assert photo["telegram_id"] == 1
+    assert photo["content_type"] == "image/jpeg"
+    assert photo["file_size"] == len(b"fake-image-bytes")
+
+    profile = client.get("/api/v1/profiles/1").json()
+    assert profile["photos_count"] == 1
+    assert profile["photos"][0]["id"] == photo["id"]
+
+    listed = client.get("/api/v1/profiles/1/photos")
+    assert listed.status_code == 200
+    assert [item["id"] for item in listed.json()] == [photo["id"]]
+
+    downloaded = client.get(photo["download_url"])
+    assert downloaded.status_code == 200
+    assert downloaded.content == b"fake-image-bytes"
+    assert downloaded.headers["content-type"].startswith("image/jpeg")
+
+    deleted = client.delete(f"/api/v1/profiles/1/photos/{photo['id']}")
+    assert deleted.status_code == 200
+
+    profile_after_delete = client.get("/api/v1/profiles/1").json()
+    assert profile_after_delete["photos_count"] == 0
+    assert profile_after_delete["photos"] == []
+
+
+def test_feed_response_includes_candidate_photos(client: TestClient) -> None:
+    _create_profile(client, 1, gender="male", gender_pref="any")
+    _create_profile(client, 2, gender="female", gender_pref="any", photos_count=0)
+    uploaded = client.post(
+        "/api/v1/profiles/2/photos",
+        files={"file": ("avatar.png", b"candidate-photo", "image/png")},
+    )
+    assert uploaded.status_code == 201
+
+    response = client.get("/api/v1/feed/1/next")
+
+    assert response.status_code == 200
+    profile = response.json()["profile"]
+    assert profile["telegram_id"] == 2
+    assert profile["photos_count"] == 1
+    assert profile["photos"][0]["id"] == uploaded.json()["id"]
+
+
+def test_metrics_endpoint_exposes_backend_counters(client: TestClient) -> None:
+    _create_profile(client, 1, gender="male", gender_pref="any")
+    _create_profile(client, 2, gender="female", gender_pref="any")
+    client.post(
+        "/api/v1/profiles/2/photos",
+        files={"file": ("avatar.jpg", b"candidate-photo", "image/jpeg")},
+    )
+    client.get("/api/v1/feed/1/next")
+    client.post(
+        "/api/v1/interactions",
+        json={
+            "requester_telegram_id": 1,
+            "responder_telegram_id": 2,
+            "is_like": True,
+        },
+    )
+
+    response = client.get("/metrics")
+
+    assert response.status_code == 200
+    body = response.text
+    assert "dating_http_requests_total" in body
+    assert "dating_feed_requests_total" in body
+    assert "dating_photo_uploads_total" in body
+    assert "dating_interactions_total" in body

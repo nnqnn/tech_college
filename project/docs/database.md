@@ -29,6 +29,8 @@ erDiagram
     uuid id PK
     bigint telegram_id FK
     varchar s3_key
+    varchar content_type
+    bigint file_size
     int sort_order
     timestamp created_at
   }
@@ -65,13 +67,23 @@ erDiagram
 - **Индексы**:
   - `user_interactions (requester_telegram_id, created_at)`
   - `user_interactions (responder_telegram_id, created_at)`
+  - `user_photos (telegram_id, sort_order)`
   - `users (city, gender, age)`
   - `user_ratings (total_score)`
+
+## Фото
+- Сами изображения хранятся в MinIO/S3.
+- `user_photos.s3_key` — ключ объекта вида `profiles/{telegram_id}/{photo_id}.jpg`.
+- `content_type` и `file_size` нужны для корректной выдачи файла и базовой диагностики.
+- `users.photos_count` синхронизируется при загрузке/удалении фото и влияет на первичный рейтинг.
+- Backend поддерживает лимит фото анкеты через `MAX_PROFILE_PHOTOS`.
 
 ## События, которые пишет Backend
 Backend фиксирует взаимодействие в `user_interactions`, а затем публикует событие в MQ. Пример payload (логическая модель):
 - `InteractionCreated`: requester, responder, is_like, created_at
 - `FeedRequested`: requester, timestamp, context (например, город/предпочтения)
+
+После изменения анкеты, фото или взаимодействия Backend также ставит Celery-задачу на пересчет рейтинга. Celery Beat регулярно запускает полный пересчет таблицы `user_ratings`.
 
 ## Рейтинг: уровни и хранение
 
@@ -102,4 +114,3 @@ total\_score = w_1 \cdot primary\_score + w_2 \cdot behavioral\_score + w_3 \cdo
 ## Кэш выдачи (Redis): формат ключей
 - `candidates:{telegram_id}` → список следующих анкет (например, 10 `telegram_id`), TTL 5–15 минут.
 - Когда список заканчивается, Backend снова формирует пачку на основе `user_ratings.total_score` + фильтров предпочтений.
-

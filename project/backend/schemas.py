@@ -53,6 +53,16 @@ class ProfileUpsertRequest(BaseModel):
     referral_telegram_id: int | None = Field(default=None, gt=0)
 
 
+class PhotoResponse(BaseModel):
+    id: str
+    telegram_id: int
+    download_url: str
+    content_type: str
+    file_size: int
+    sort_order: int
+    created_at: datetime
+
+
 class ProfileResponse(BaseModel):
     telegram_id: int
     username: str | None = None
@@ -69,6 +79,7 @@ class ProfileResponse(BaseModel):
     city_pref: str | None = None
     interests_pref: str | None = None
     referral_telegram_id: int | None = None
+    photos: list[PhotoResponse] = Field(default_factory=list)
     updated_at: datetime
 
 

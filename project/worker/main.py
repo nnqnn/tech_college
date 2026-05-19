@@ -5,16 +5,15 @@ import logging
 
 import pika
 
+from backend.logging_config import configure_logging as configure_backend_logging
 from backend.config import load_settings
 
 logger = logging.getLogger(__name__)
 
 
 def configure_logging() -> None:
-    logging.basicConfig(
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-        level=logging.INFO,
-    )
+    settings = load_settings()
+    configure_backend_logging(structured=settings.structured_logging)
 
 
 def main() -> None:

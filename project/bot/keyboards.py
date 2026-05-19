@@ -55,3 +55,13 @@ def profile_action_keyboard() -> ReplyKeyboardMarkup:
         ],
         resize_keyboard=True,
     )
+
+
+def photo_upload_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            ["✅ Готово", "⏭ Пропустить"],
+            ["⬅️ В меню"],
+        ],
+        resize_keyboard=True,
+    )

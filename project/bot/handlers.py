@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+from io import BytesIO
 
 import httpx
 from telegram import Update
@@ -12,6 +13,7 @@ from bot.keyboards import (
     gender_keyboard,
     gender_preference_keyboard,
     main_menu_keyboard,
+    photo_upload_keyboard,
     profile_action_keyboard,
     profile_menu_keyboard,
 )
@@ -26,8 +28,11 @@ HELP_TEXT = (
 )
 
 PROFILE_FLOW_KEY = "profile_flow"
+PHOTO_FLOW_KEY = "photo_flow"
 CURRENT_PROFILE_KEY = "current_profile_id"
 SKIP_VALUES = {"любой", "любая", "все", "неважно", "нет", "-", "any", "all"}
+PHOTO_DONE_VALUES = {"✅ готово", "готово", "⏭ пропустить", "пропустить", "skip"}
+MAX_PROFILE_PHOTOS = 4
 
 
 class ProfileInputError(ValueError):
@@ -63,13 +68,6 @@ def _parse_age_range(value: str) -> tuple[int, int]:
     if age_min < 18 or age_max > 120 or age_min > age_max:
         raise ProfileInputError("Диапазон должен быть от 18 до 120, минимум не больше максимума.")
     return age_min, age_max
-
-
-def _parse_photos_count(value: str) -> int:
-    photos_count = int(value.strip())
-    if photos_count < 0 or photos_count > 20:
-        raise ProfileInputError("Количество фото должно быть от 0 до 20.")
-    return photos_count
 
 
 PROFILE_STEPS: tuple[dict[str, object], ...] = (
@@ -109,11 +107,6 @@ PROFILE_STEPS: tuple[dict[str, object], ...] = (
         "key": "city_pref",
         "prompt": "Какой город предпочитаешь? Можно написать 'любой'.",
         "parser": _parse_optional_text,
-    },
-    {
-        "key": "photos_count",
-        "prompt": "Сколько фото будет в анкете? Напиши число.",
-        "parser": _parse_photos_count,
     },
 )
 
@@ -171,6 +164,10 @@ async def menu_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     text = update.message.text.strip()
+    if PHOTO_FLOW_KEY in context.user_data:
+        await _handle_photo_flow_text(update, context, text)
+        return
+
     if PROFILE_FLOW_KEY in context.user_data:
         await _handle_profile_step(update, context, text)
         return
@@ -186,6 +183,7 @@ async def menu_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     if text == "⬅️ В меню":
         context.user_data.pop(PROFILE_FLOW_KEY, None)
+        context.user_data.pop(PHOTO_FLOW_KEY, None)
         context.user_data.pop(CURRENT_PROFILE_KEY, None)
         await update.message.reply_text("Главное меню.", reply_markup=main_menu_keyboard())
         return
@@ -261,12 +259,103 @@ async def _handle_profile_step(
         return
 
     context.user_data.pop(PROFILE_FLOW_KEY, None)
+    context.user_data[PHOTO_FLOW_KEY] = {"count": profile.photos_count}
     await update.message.reply_text(
         (
             "Анкета сохранена.\n"
             f"Заполненность: {profile.profile_completion_pct}%\n"
-            "Теперь можно смотреть анкеты."
+            f"Отправь до {MAX_PROFILE_PHOTOS} фото для анкеты или нажми готово."
         ),
+        reply_markup=photo_upload_keyboard(),
+    )
+
+
+async def photo_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message is None or update.effective_user is None:
+        return
+
+    if PHOTO_FLOW_KEY not in context.user_data:
+        await update.message.reply_text(
+            "Фото можно добавить после заполнения анкеты.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    await _handle_photo_upload(update, context)
+
+
+async def _handle_photo_flow_text(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+) -> None:
+    if update.message is None:
+        return
+
+    if text == "⬅️ В меню" or text.strip().lower() in PHOTO_DONE_VALUES:
+        await _finish_photo_flow(update, context)
+        return
+
+    await update.message.reply_text(
+        "Отправь фото файлом из Telegram или нажми готово.",
+        reply_markup=photo_upload_keyboard(),
+    )
+
+
+async def _handle_photo_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message is None or update.effective_user is None or not update.message.photo:
+        return
+
+    flow = context.user_data.setdefault(PHOTO_FLOW_KEY, {"count": 0})
+    current_count = int(flow.get("count", 0))
+    if current_count >= MAX_PROFILE_PHOTOS:
+        await _finish_photo_flow(update, context)
+        return
+
+    backend_client = _backend_client_from_context(context)
+    telegram_photo = update.message.photo[-1]
+    try:
+        telegram_file = await context.bot.get_file(telegram_photo.file_id)
+        content = bytes(await telegram_file.download_as_bytearray())
+        await backend_client.upload_profile_photo(
+            telegram_id=update.effective_user.id,
+            filename=f"{telegram_photo.file_unique_id}.jpg",
+            content=content,
+            content_type="image/jpeg",
+        )
+    except httpx.HTTPStatusError as error:
+        logger.exception("Photo upload failed: %s", error)
+        await update.message.reply_text(
+            "Не удалось сохранить фото. Возможно, достигнут лимит.",
+            reply_markup=photo_upload_keyboard(),
+        )
+        return
+    except httpx.HTTPError as error:
+        logger.exception("Photo upload failed: %s", error)
+        await update.message.reply_text(
+            "Сервис фото сейчас недоступен.",
+            reply_markup=photo_upload_keyboard(),
+        )
+        return
+
+    current_count += 1
+    flow["count"] = current_count
+    if current_count >= MAX_PROFILE_PHOTOS:
+        await _finish_photo_flow(update, context)
+        return
+
+    await update.message.reply_text(
+        f"Фото добавлено: {current_count}/{MAX_PROFILE_PHOTOS}. Можно отправить еще.",
+        reply_markup=photo_upload_keyboard(),
+    )
+
+
+async def _finish_photo_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message is None:
+        return
+    context.user_data.pop(PHOTO_FLOW_KEY, None)
+    await update.message.reply_text(
+        "Готово. Теперь можно смотреть анкеты.",
         reply_markup=main_menu_keyboard(),
     )
 
@@ -293,8 +382,11 @@ async def _show_my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
-    await update.message.reply_text(
-        "Твоя анкета:\n\n" + _format_profile(profile),
+    await _reply_profile(
+        update,
+        backend_client,
+        profile,
+        text="Твоя анкета:\n\n" + _format_profile(profile),
         reply_markup=profile_menu_keyboard(has_profile=True),
     )
 
@@ -371,8 +463,11 @@ async def _show_next_profile(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     context.user_data[CURRENT_PROFILE_KEY] = profile.telegram_id
-    await update.message.reply_text(
-        _format_profile(profile),
+    await _reply_profile(
+        update,
+        backend_client,
+        profile,
+        text=_format_profile(profile),
         reply_markup=profile_action_keyboard(),
     )
 
@@ -425,6 +520,35 @@ async def _handle_profile_action(
     if interaction.match:
         await update.message.reply_text("Есть взаимный лайк. Можно начинать общение.")
     await _show_next_profile(update, context)
+
+
+async def _reply_profile(
+    update: Update,
+    backend_client: BackendClient,
+    profile: ProfileResult,
+    *,
+    text: str,
+    reply_markup,
+) -> None:
+    if update.message is None:
+        return
+
+    if profile.photos:
+        try:
+            photo_bytes = await backend_client.download_photo(profile.photos[0].download_url)
+        except httpx.HTTPError as error:
+            logger.warning("Profile photo download failed: %s", error)
+        else:
+            photo_file = BytesIO(photo_bytes)
+            photo_file.name = f"profile-{profile.telegram_id}.jpg"
+            await update.message.reply_photo(
+                photo=photo_file,
+                caption=text,
+                reply_markup=reply_markup,
+            )
+            return
+
+    await update.message.reply_text(text, reply_markup=reply_markup)
 
 
 def _format_profile(profile: ProfileResult) -> str:

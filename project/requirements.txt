@@ -6,3 +6,8 @@ pytest
 psycopg[binary]
 redis
 pika
+celery
+boto3
+python-multipart
+prometheus-client
+python-json-logger

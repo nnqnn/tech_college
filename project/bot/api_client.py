@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
@@ -12,6 +13,14 @@ class RegistrationResult:
 
 
 @dataclass(frozen=True)
+class PhotoResult:
+    id: str
+    download_url: str
+    content_type: str
+    file_size: int
+
+
+@dataclass(frozen=True)
 class ProfileResult:
     telegram_id: int
     age: int | None
@@ -20,6 +29,7 @@ class ProfileResult:
     city: str | None
     profile_completion_pct: int
     photos_count: int
+    photos: tuple[PhotoResult, ...] = ()
     total_score: float | None = None
 
 
@@ -79,6 +89,27 @@ class BackendClient:
             data = response.json()
         return _profile_from_payload(data)
 
+    async def upload_profile_photo(
+        self,
+        *,
+        telegram_id: int,
+        filename: str,
+        content: bytes,
+        content_type: str,
+    ) -> PhotoResult:
+        files = {"file": (filename, content, content_type)}
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as client:
+            response = await client.post(f"/api/v1/profiles/{telegram_id}/photos", files=files)
+            response.raise_for_status()
+            data = response.json()
+        return _photo_from_payload(data)
+
+    async def download_photo(self, download_url: str) -> bytes:
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as client:
+            response = await client.get(download_url)
+            response.raise_for_status()
+            return response.content
+
     async def get_next_profile(self, telegram_id: int) -> ProfileResult | None:
         async with httpx.AsyncClient(base_url=self._base_url, timeout=10.0) as client:
             response = await client.get(f"/api/v1/feed/{telegram_id}/next")
@@ -96,6 +127,7 @@ class BackendClient:
             city=profile.city,
             profile_completion_pct=profile.profile_completion_pct,
             photos_count=profile.photos_count,
+            photos=profile.photos,
             total_score=float(data["rating"]["total_score"]),
         )
 
@@ -118,7 +150,7 @@ class BackendClient:
         return InteractionResult(match=bool(data["match"]))
 
 
-def _profile_from_payload(data: dict[str, object]) -> ProfileResult:
+def _profile_from_payload(data: dict[str, Any]) -> ProfileResult:
     return ProfileResult(
         telegram_id=int(data["telegram_id"]),
         age=data["age"] if data["age"] is None else int(data["age"]),
@@ -127,4 +159,14 @@ def _profile_from_payload(data: dict[str, object]) -> ProfileResult:
         city=data["city"],
         profile_completion_pct=int(data["profile_completion_pct"]),
         photos_count=int(data["photos_count"]),
+        photos=tuple(_photo_from_payload(photo) for photo in data.get("photos", [])),
+    )
+
+
+def _photo_from_payload(data: dict[str, Any]) -> PhotoResult:
+    return PhotoResult(
+        id=str(data["id"]),
+        download_url=str(data["download_url"]),
+        content_type=str(data["content_type"]),
+        file_size=int(data["file_size"]),
     )

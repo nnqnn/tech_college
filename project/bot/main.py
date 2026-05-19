@@ -6,7 +6,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 from bot.api_client import BackendClient
 from bot.config import load_settings
-from bot.handlers import help_command, menu_message_handler, start_command
+from bot.handlers import help_command, menu_message_handler, photo_message_handler, start_command
 
 
 def configure_logging() -> None:
@@ -25,6 +25,7 @@ def main() -> None:
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(MessageHandler(filters.PHOTO, photo_message_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_message_handler))
 
     application.run_polling()
